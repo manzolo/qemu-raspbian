@@ -305,7 +305,7 @@ start_qemu() {
         "-M" "versatilepb"
         "-dtb" "versatile-pb.dtb"
         "-serial" "stdio"
-        "-append" "root=/dev/sda2 rootfstype=ext4 rw"
+        "-append" "root=/dev/sda2 rootfstype=ext4 rw panic=1"
         "-drive" "format=raw,file=$RPI_IMAGE"
         "-nic" "$netdev_options"
         "-no-reboot"

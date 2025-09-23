@@ -369,22 +369,60 @@ show_options_menu() {
     local distro=$1
     local temp_file=$(mktemp)
     
-    dialog --title "🔧 ${distro^} Options with Port Management" \
-           --checklist "Select options for $distro emulation:" 18 75 10 \
-           "ssh" "Enable SSH (auto-allocated port)" on \
-           "vnc" "Enable VNC server (auto-allocated port)" off \
-           "rdp" "Enable RDP server (auto-allocated port)" off \
-           "headless" "Run headless (no GUI)" off \
-           $([ "$distro" == "bookworm" ] && echo "wayvnc \"Enable WayVNC for Wayland (auto-allocated port)\" off") 2> "$temp_file"
+    # Verifica che la distribuzione sia valida
+    if [[ ! "$distro" =~ ^(jessie|stretch|buster|bullseye|bookworm)$ ]]; then
+        echo "ERROR: Distribuzione non valida: $distro" >&2
+        show_main_menu
+        return
+    fi
+    
+    # Costruisci il comando dialog step by step per evitare errori di sintassi
+    local dialog_cmd="dialog --title \"🔧 ${distro^} Options with Port Management\" \
+        --checklist \"Select options for $distro emulation:\" 18 75 10 \
+        \"ssh\" \"Enable SSH (auto-allocated port)\" on \
+        \"vnc\" \"Enable VNC server (auto-allocated port)\" off \
+        \"rdp\" \"Enable RDP server (auto-allocated port)\" off \
+        \"headless\" \"Run headless (no GUI)\" off"
+    
+    # Aggiungi WayVNC solo per bookworm
+    if [ "$distro" == "bookworm" ]; then
+        dialog_cmd="$dialog_cmd \"wayvnc\" \"Enable WayVNC for Wayland (auto-allocated port)\" off"
+    fi
+    
+    # Esegui il comando dialog
+    eval "$dialog_cmd" 2> "$temp_file"
+    local dialog_result=$?
     
     local selections=$(cat "$temp_file")
     rm -f "$temp_file"
     
-    if [ -n "$selections" ]; then
-        show_launch_options_menu "$distro" "$selections"
-    else
-        show_main_menu
-    fi
+    # Gestisci il risultato
+    case $dialog_result in
+        0)  # OK premuto
+            if [ -n "$selections" ]; then
+                show_launch_options_menu "$distro" "$selections"
+            else
+                # Nessuna opzione selezionata, chiedi conferma
+                dialog --title "No Options Selected" \
+                       --yesno "No options were selected. Do you want to launch with default settings (SSH only)?" 8 60
+                if [ $? -eq 0 ]; then
+                    show_launch_options_menu "$distro" "ssh"
+                else
+                    show_main_menu
+                fi
+            fi
+            ;;
+        1)  # Cancel premuto
+            show_main_menu
+            ;;
+        255)  # ESC premuto
+            show_main_menu
+            ;;
+        *)  # Errore imprevisto
+            dialog --title "Dialog Error" --msgbox "An error occurred with the dialog. Returning to main menu." 8 60
+            show_main_menu
+            ;;
+    esac
 }
 
 # Launch options menu with port configuration

@@ -916,9 +916,9 @@ start_qemu() {
     if [ "$HEADLESS" = true ]; then
         qemu_args+=("-nographic")
         log "Running in headless mode (nographic)"
-    else
-        qemu_args+=("-nographic")
-        log "Using nographic mode for maximum compatibility"
+    #else
+    #    qemu_args+=("-nographic")
+    #    log "Using nographic mode for maximum compatibility"
     fi
 
     # Show connection info
