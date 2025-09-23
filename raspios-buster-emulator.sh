@@ -292,6 +292,20 @@ setup_remote_access() {
     # Configure desktop services if needed
     if [ "$ENABLE_RDP" = true ] || [ "$ENABLE_VNC" = true ]; then
         setup_desktop_services
+        
+        # NEW: Also setup first boot script for better initialization
+        local root_offset=$(fdisk -l "$RPI_IMAGE" | awk '/Linux/ {print $2 * 512}')
+        if [ -n "$root_offset" ]; then
+            local root_mount_dir="/tmp/rpi_root_$$"
+            sudo mkdir -p "$root_mount_dir"
+            sudo mount -o loop,offset="$root_offset" "$RPI_IMAGE" "$root_mount_dir"
+            
+            # Call the function from port_management.sh
+            setup_first_boot_script "$root_mount_dir" "buster"
+            
+            sudo umount "$root_mount_dir"
+            sudo rmdir "$root_mount_dir"
+        fi
     fi
 
     log "Remote access configured for Buster ✓"
@@ -312,6 +326,14 @@ setup_desktop_services() {
     sudo mkdir -p "$root_mount_dir"
     sudo mount -o loop,offset="$root_offset" "$RPI_IMAGE" "$root_mount_dir"
 
+    # Abilita SSH
+    sudo ln -sf /lib/systemd/system/ssh.service \
+        "$root_mount_dir/etc/systemd/system/multi-user.target.wants/ssh.service"
+
+    # Abilita VNC (se RealVNC è installato nell’immagine Jessie)
+    sudo ln -sf /lib/systemd/system/vncserver-x11-serviced.service \
+        "$root_mount_dir/etc/systemd/system/multi-user.target.wants/vncserver-x11-serviced.service"
+
     # Create setup script for desktop services
     sudo tee "$root_mount_dir/home/pi/setup_desktop_buster.sh" > /dev/null << 'EOF'
 #!/bin/bash
@@ -322,38 +344,6 @@ log_msg() {
 }
 
 log_msg "Starting desktop services setup for Buster ARMv7..."
-
-# Update package lists
-apt-get update -y
-
-# Install desktop environment if not present
-if ! dpkg -l | grep -q "raspberrypi-ui-mods"; then
-    log_msg "Installing desktop environment..."
-    apt-get install -y --no-install-recommends raspberrypi-ui-mods lxterminal
-fi
-
-# Enable VNC if requested
-if [ "$1" = "vnc" ] || [ "$1" = "both" ]; then
-    log_msg "Setting up VNC for Buster..."
-    
-    # Install RealVNC if not present
-    if ! dpkg -l | grep -q "realvnc-vnc-server"; then
-        apt-get install -y realvnc-vnc-server realvnc-vnc-viewer
-    fi
-    
-    # Enable VNC via raspi-config
-    raspi-config nonint do_vnc 0
-    
-    # Configure VNC service
-    systemctl enable vncserver-x11-serviced.service
-    systemctl start vncserver-x11-serviced.service
-    
-    # Set VNC password
-    echo 'raspberry' | vncpasswd -service
-    systemctl restart vncserver-x11-serviced.service
-    
-    log_msg "VNC configured on port 5900 (password: raspberry)"
-fi
 
 # Enable RDP if requested
 if [ "$1" = "rdp" ] || [ "$1" = "both" ]; then

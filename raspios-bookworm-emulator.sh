@@ -452,6 +452,9 @@ EOF
         echo "ENABLE_RDP=$ENABLE_RDP" | sudo tee -a "$root_mount_dir/etc/environment" > /dev/null
     fi
 
+    setup_first_boot_script "$root_mount_dir" "bookworm"
+    
+    # Unmount root partition and detach loop device
     sudo umount "$root_mount_dir"
     sudo losetup -d "$root_loop_device"
 

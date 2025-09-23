@@ -107,35 +107,77 @@ setup_remote_access() {
     log "Configuring remote access for Jessie..."
 
     # Find the offset of the boot partition
-    local offset=$(fdisk -l "$RPI_IMAGE" | awk '/W95 FAT32/ {print $2 * 512}')
-
-    if [ -z "$offset" ]; then
+    local boot_offset=$(fdisk -l "$RPI_IMAGE" | awk '/W95 FAT32/ {print $2 * 512}')
+    if [ -z "$boot_offset" ]; then
         error "Could not find the boot partition"
         exit 1
     fi
 
     # Create a temporary mount directory
-    local mount_dir="/tmp/rpi_boot_$$"
-    sudo mkdir -p "$mount_dir"
+    local boot_mount_dir="/tmp/rpi_boot_$$"
+    sudo mkdir -p "$boot_mount_dir"
 
     # Mount the boot partition
-    sudo mount -o loop,offset="$offset" "$RPI_IMAGE" "$mount_dir"
+    sudo mount -o loop,offset="$boot_offset" "$RPI_IMAGE" "$boot_mount_dir"
 
     # Enable SSH (Jessie has SSH enabled by default, but we ensure it)
-    sudo touch "$mount_dir/ssh"
+    sudo touch "$boot_mount_dir/ssh"
 
     # Configure basic display settings
     log "Configuring display settings..."
-    echo "" | sudo tee -a "$mount_dir/config.txt"
-    echo "# Basic Display Configuration for Jessie" | sudo tee -a "$mount_dir/config.txt"
-    echo "hdmi_force_hotplug=1" | sudo tee -a "$mount_dir/config.txt"
-    echo "gpu_mem=64" | sudo tee -a "$mount_dir/config.txt"
+    echo "" | sudo tee -a "$boot_mount_dir/config.txt"
+    echo "# Basic Display Configuration for Jessie" | sudo tee -a "$boot_mount_dir/config.txt"
+    echo "hdmi_force_hotplug=1" | sudo tee -a "$boot_mount_dir/config.txt"
+    echo "gpu_mem=64" | sudo tee -a "$boot_mount_dir/config.txt"
 
-    # Unmount
-    sudo umount "$mount_dir"
-    sudo rmdir "$mount_dir"
+    sudo umount "$boot_mount_dir"
+    sudo rmdir "$boot_mount_dir"
+
+    # Setup desktop services if needed using raspi-config
+    if [ "$ENABLE_VNC" = true ] || [ "$ENABLE_RDP" = true ]; then
+        setup_desktop_services_simple
+    fi
 
     log "Remote access configured for Jessie ✓"
+}
+
+setup_desktop_services_simple() {
+    log "Setting up desktop services for Jessie using raspi-config..."
+
+    local root_offset=$(fdisk -l "$RPI_IMAGE" | awk '/Linux/ {print $2 * 512}')
+    if [ -z "$root_offset" ]; then
+        error "Could not find the root partition"
+        return 1
+    fi
+
+    local root_mount_dir="/tmp/rpi_root_$$"
+    sudo mkdir -p "$root_mount_dir"
+    
+    # Use loop device to avoid conflicts
+    local loop_device=$(sudo losetup -f)
+    sudo losetup -o "$root_offset" "$loop_device" "$RPI_IMAGE"
+    
+    if ! sudo mount "$loop_device" "$root_mount_dir"; then
+        error "Failed to mount root partition"
+        sudo losetup -d "$loop_device" 2>/dev/null || true
+        sudo rmdir "$root_mount_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    # Abilita SSH
+    sudo ln -sf /lib/systemd/system/ssh.service \
+        "$root_mount_dir/etc/systemd/system/multi-user.target.wants/ssh.service"
+
+    # Abilita VNC (se RealVNC è installato nell’immagine Jessie)
+    sudo ln -sf /lib/systemd/system/vncserver-x11-serviced.service \
+        "$root_mount_dir/etc/systemd/system/multi-user.target.wants/vncserver-x11-serviced.service"
+
+    # Clean unmount
+    sudo umount "$root_mount_dir"
+    sudo losetup -d "$loop_device"
+    sudo rmdir "$root_mount_dir"
+    
+    log "Simplified desktop services configured for Jessie ✓"
 }
 
 # Resize the image
@@ -250,23 +292,33 @@ start_qemu() {
         log "WayVNC will be available on port $WAYVNC_PORT"
     fi
 
-    # CORREZIONE: Parametri specifici per Jessie (kernel più vecchio)
+    # Base QEMU arguments
     local qemu_args=(
         "-kernel" "kernel-qemu-4.4.34-jessie"
         "-cpu" "arm1176"
         "-m" "256"
         "-M" "versatilepb"
-        "-serial" "stdio"
-        "-append" "root=/dev/sda2 rootfstype=ext4 rw panic=1"  # Aggiunto panic=1
-        "-drive" "format=raw,file=$RPI_IMAGE,if=scsi"  # Cambiato da -hda a -drive
+        "-append" "root=/dev/sda2 rootfstype=ext4 rw panic=1 console=ttyAMA0,115200"
+        "-drive" "format=raw,file=$RPI_IMAGE,if=scsi"
         "-nic" "$netdev_options"
         "-no-reboot"
     )
     
-    # Display configuration
+    # ALTERNATIVE FIX: Use different approaches for headless vs GUI
     if [ "$HEADLESS" = true ]; then
+        # Headless: Use telnet monitor to avoid stdio conflicts
+        local monitor_port=$(shuf -i 20000-30000 -n 1)
         qemu_args+=("-nographic")
-        log "Running in headless mode"
+        qemu_args+=("-chardev" "stdio,id=char0,signal=off")
+        qemu_args+=("-serial" "chardev:char0")
+        qemu_args+=("-monitor" "telnet:127.0.0.1:$monitor_port,server,nowait")
+        log "Running in headless mode - monitor on telnet port $monitor_port"
+        log "To access monitor: telnet localhost $monitor_port"
+    else
+        # GUI mode: Use separate channels
+        qemu_args+=("-serial" "stdio")
+        qemu_args+=("-monitor" "vc")
+        log "Running in GUI mode"
     fi
 
     echo
@@ -287,15 +339,28 @@ start_qemu() {
     echo "  - SSH is enabled by default in this version"
     echo "  - Default user: pi, password: raspberry"  
     echo "  - Uses ARM1176 CPU with 256MB RAM"
-    echo "  - Kernel panic fix applied"
-    echo
-    warning "QEMU Controls:"
-    echo "  Ctrl+A, X: Exit emulation"
-    echo "  Ctrl+A, C: Switch to QEMU monitor"
-    echo "  Ctrl+C: Force stop (recommended)"
     echo
     
-        log "Starting [$DISTRO] emulation..."
+    if [ "$HEADLESS" = true ]; then
+        warning "Headless Mode Controls:"
+        echo "  Ctrl+A, X: Exit emulation"
+        echo "  Ctrl+C: Force stop (recommended)"
+        echo "  Monitor: telnet localhost $monitor_port"
+    else
+        warning "GUI Mode Controls:"
+        echo "  Ctrl+Alt+2: Switch to QEMU monitor"
+        echo "  Ctrl+Alt+1: Switch back to console"
+        echo "  Ctrl+C: Force stop"
+    fi
+    echo
+    
+    log "Starting [$DISTRO] emulation..."
+    
+    # Debug: Show the exact command being run
+    log "Debug: QEMU command line:"
+    echo "  $qemu_cmd ${qemu_args[*]}"
+    echo
+    
     "$qemu_cmd" "${qemu_args[@]}" &
     local qemu_pid=$!
     

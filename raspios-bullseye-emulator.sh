@@ -62,22 +62,6 @@ detect_machine_type() {
         ROOT_DEVICE="/dev/mmcblk0p2"
         DTB_REQUIRED="bcm2710-rpi-3-b-plus.dtb"
         log "Using Raspberry Pi 3A+ machine type"
-    elif [ "$FORCE_VIRT" = true ]; then
-        MACHINE_TYPE="virt"
-        CPU_TYPE="cortex-a57"
-        MEMORY="2G"
-        STORAGE_INTERFACE="virtio"
-        ROOT_DEVICE="/dev/vda2"
-        DTB_REQUIRED=""
-        warning "Forcing use of generic ARM64 virt machine"
-    else
-        MACHINE_TYPE="virt"
-        CPU_TYPE="cortex-a57"
-        MEMORY="2G"
-        STORAGE_INTERFACE="virtio"
-        ROOT_DEVICE="/dev/vda2"
-        DTB_REQUIRED=""
-        warning "No Pi-specific machines found, using generic ARM64 virt machine"
     fi
     
     log "Selected machine: $MACHINE_TYPE with $CPU_TYPE CPU and $MEMORY RAM"
@@ -100,8 +84,8 @@ check_dependencies() {
     if [ ${#missing[@]} -ne 0 ]; then
         error "The following dependencies are missing: ${missing[*]}"
         echo "On Ubuntu/Debian, install with:"
-        echo "sudo apt-get update"
-        echo "sudo apt-get install -y qemu-system-aarch64 qemu-user-static wget xz-utils fdisk openssl"
+        echo "sudo apt update"
+        echo "sudo apt install -y qemu-system-aarch64 qemu-user-static wget xz-utils fdisk openssl"
         exit 1
     fi
 
@@ -331,9 +315,9 @@ setup_remote_access() {
         sudo tee "$root_mount_dir/etc/systemd/system/setup-remote-desktop.service" > /dev/null << 'EOF'
 [Unit]
 Description=Setup Remote Desktop Services (VNC/RDP)
-After=network.target graphical-session.target
+After=network.target
 Before=display-manager.service
-Wants=graphical-session.target
+ConditionPathExists=!/boot/.remote-desktop-configured
 
 [Service]
 Type=oneshot
@@ -344,64 +328,19 @@ StandardError=journal
 TimeoutStartSec=600
 
 [Install]
-WantedBy=graphical.target multi-user.target
+WantedBy=multi-user.target
 EOF
         
         # Enable the service
         sudo mkdir -p "$root_mount_dir/etc/systemd/system/multi-user.target.wants"
-        sudo mkdir -p "$root_mount_dir/etc/systemd/system/graphical.target.wants"
+        #sudo mkdir -p "$root_mount_dir/etc/systemd/system/graphical.target.wants"
         sudo ln -sf "/etc/systemd/system/setup-remote-desktop.service" "$root_mount_dir/etc/systemd/system/multi-user.target.wants/setup-remote-desktop.service"
-        sudo ln -sf "/etc/systemd/system/setup-remote-desktop.service" "$root_mount_dir/etc/systemd/system/graphical.target.wants/setup-remote-desktop.service"
+        #sudo ln -sf "/etc/systemd/system/setup-remote-desktop.service" "$root_mount_dir/etc/systemd/system/graphical.target.wants/setup-remote-desktop.service"
         
         log "Created and enabled remote desktop setup service"
     fi
     
-    if [[ "$STORAGE_INTERFACE" == "virtio" ]]; then
-        # Configure for virtio block devices - more comprehensive approach
-        sudo tee "$root_mount_dir/etc/modules-load.d/virtio-block.conf" > /dev/null << 'EOF'
-# Critical virtio modules for QEMU virt machine - load early
-virtio
-virtio_ring
-virtio_pci
-virtio_blk
-virtio_scsi
-virtio_mmio
-EOF
-        log "Configured virtio block device modules for virt machine"
-        
-        # CRITICAL: Add virtio modules to initramfs-tools configuration
-        sudo mkdir -p "$root_mount_dir/etc/initramfs-tools"
-        
-        # Check if modules file exists and handle it properly
-        if [ ! -f "$root_mount_dir/etc/initramfs-tools/modules" ]; then
-            sudo touch "$root_mount_dir/etc/initramfs-tools/modules"
-        fi
-        
-        # Add virtio modules if not already present
-        if ! sudo grep -q "virtio_blk" "$root_mount_dir/etc/initramfs-tools/modules"; then
-            sudo tee -a "$root_mount_dir/etc/initramfs-tools/modules" > /dev/null << 'EOF'
-# CRITICAL: Virtio modules must be in initramfs for early boot
-virtio
-virtio_ring
-virtio_pci
-virtio_blk
-virtio_scsi
-virtio_mmio
-EOF
-            log "Added virtio modules to initramfs"
-        else
-            log "Virtio modules already in initramfs configuration"
-        fi
-        
-        # Force virtio modules to be included in initramfs
-        sudo mkdir -p "$root_mount_dir/etc/initramfs-tools/conf.d"
-        sudo tee "$root_mount_dir/etc/initramfs-tools/conf.d/virtio.conf" > /dev/null << 'EOF'
-# Force inclusion of virtio drivers
-MODULES=most
-BUSYBOX=y
-EOF
-        log "Added virtio modules to initramfs configuration"
-    else
+    if [[ "$STORAGE_INTERFACE" == "sd" ]]; then
         # Configure for SD card interface (Pi machines)
         sudo tee "$root_mount_dir/etc/modules-load.d/block-devices.conf" > /dev/null << 'EOF'
 # Essential block device modules for Pi machines
@@ -413,35 +352,6 @@ virtio_scsi
 virtio_pci
 EOF
         log "Configured SD card block device modules for Pi machine"
-    fi
-
-    # FIXED: Update fstab if using virtio to change root device
-    if [[ "$STORAGE_INTERFACE" == "virtio" ]] && [[ "$ROOT_DEVICE" == "/dev/vda2" ]]; then
-        log "Updating fstab for virtio root device..."
-        
-        # Backup original fstab
-        sudo cp "$root_mount_dir/etc/fstab" "$root_mount_dir/etc/fstab.backup"
-        
-        # Update fstab to use virtio device names
-        sudo sed -i 's|/dev/mmcblk0p1|/dev/vda1|g' "$root_mount_dir/etc/fstab"
-        sudo sed -i 's|/dev/mmcblk0p2|/dev/vda2|g' "$root_mount_dir/etc/fstab"
-        
-        log "Updated fstab: /dev/mmcblk0p* -> /dev/vda*"
-    fi
-
-    # Ensure initramfs includes necessary modules
-    if [ -f "$root_mount_dir/etc/initramfs-tools/modules" ]; then
-        if [[ "$STORAGE_INTERFACE" == "virtio" ]]; then
-            # Don't duplicate - modules already added above
-            log "Virtio modules already configured in initramfs-tools"
-        else
-            sudo tee -a "$root_mount_dir/etc/initramfs-tools/modules" > /dev/null << 'EOF'
-# Pi SD card block device support
-mmc_block
-sdhci
-sdhci_of_arasan
-EOF
-        fi
     fi
 
     # Create a comprehensive setup script for remote desktop services
@@ -458,16 +368,22 @@ log_msg() {
     echo "[REMOTE-DESKTOP] \$1" | tee -a /var/log/remote-desktop-setup.log
 }
 
-log_msg "Starting remote desktop configuration..."
+# Check if the setup has already been completed
+if [ -f "/boot/.remote-desktop-configured" ]; then
+    log_msg "Remote desktop setup already completed. Skipping configuration."
+    exit 0
+fi
+
+log_msg "Starting first-time remote desktop configuration..."
 
 # Update package lists
 log_msg "Updating package lists..."
-apt-get update -y
+apt update -y
 
 # Install desktop environment if not present
 if ! dpkg -l | grep -q "raspberrypi-ui-mods"; then
     log_msg "Installing desktop environment (this may take several minutes)..."
-    apt-get install -y --no-install-recommends raspberrypi-ui-mods lxterminal gvfs
+    apt install -y --no-install-recommends raspberrypi-ui-mods lxterminal gvfs
 fi
 
 EOF
@@ -482,7 +398,7 @@ if [ "$ENABLE_VNC" != "false" ]; then
     # Install RealVNC Server (usually pre-installed on Pi OS)
     if ! dpkg -l | grep -q "realvnc-vnc-server"; then
         log_msg "Installing RealVNC server..."
-        apt-get install -y realvnc-vnc-server realvnc-vnc-viewer
+        apt install -y realvnc-vnc-server realvnc-vnc-viewer
     fi
     
     # Enable VNC via raspi-config
@@ -492,6 +408,9 @@ if [ "$ENABLE_VNC" != "false" ]; then
     # Wait for VNC service to be ready
     log_msg "Waiting for VNC service to initialize..."
     sleep 5
+
+    echo 'Authentication=VncAuth' | tee -a /root/.vnc/config.d/vncserver-x11
+    echo 'Encryption=PreferOn' | tee -a /root/.vnc/config.d/vncserver-x11
     
     # Enable and start VNC service first
     log_msg "Starting VNC service..."
@@ -537,7 +456,7 @@ if [ "$ENABLE_RDP" != "false" ]; then
     
     # Install xrdp
     log_msg "Installing xrdp server..."
-    apt-get install -y xrdp
+    apt install -y xrdp
     
     # Configure xrdp
     log_msg "Configuring xrdp settings..."
@@ -656,115 +575,8 @@ EOF
         log "Created comprehensive remote desktop setup script"
     fi
     
-    if [[ "$STORAGE_INTERFACE" == "virtio" ]]; then
-        # Special script for virtio compatibility with aggressive module loading
-        sudo tee "$root_mount_dir/usr/local/bin/fix-virtio.sh" > /dev/null << 'EOF'
-#!/bin/bash
-# Critical virtio setup for QEMU compatibility
-
-# Function to log messages
-log_msg() {
-    echo "[VIRTIO-FIX] $1" | tee -a /var/log/virtio-fix.log
-}
-
-log_msg "Starting virtio compatibility setup..."
-
-# Force load critical virtio modules if not already loaded
-for module in virtio virtio_ring virtio_pci virtio_blk virtio_scsi virtio_mmio; do
-    if ! lsmod | grep -q "^$module"; then
-        log_msg "Loading module: $module"
-        modprobe "$module" 2>/dev/null && log_msg "Successfully loaded $module" || log_msg "Failed to load $module"
-    else
-        log_msg "Module $module already loaded"
-    fi
-done
-
-# Check if virtio block devices are detected
-if ls /dev/vda* >/dev/null 2>&1; then
-    log_msg "Virtio block devices detected: $(ls /dev/vda* 2>/dev/null | tr '\n' ' ')"
-else
-    log_msg "WARNING: No virtio block devices found!"
-    log_msg "Available block devices: $(ls /dev/ | grep -E '^(sd|hd|vd|nvme|mmcblk)' | tr '\n' ' ')"
-fi
-
-# Rebuild initramfs if needed
-if [ ! -f /boot/.virtio-initramfs-fixed ]; then
-    log_msg "Updating initramfs with virtio modules..."
+    setup_first_boot_script "$root_mount_dir" "bullseye"
     
-    # Force update of all kernels
-    update-initramfs -u -k all
-    
-    # Create marker
-    touch /boot/.virtio-initramfs-fixed
-    
-    log_msg "Initramfs updated. System should reboot for changes to take effect."
-    log_msg "Scheduling reboot in 10 seconds..."
-    
-    # Schedule reboot to apply initramfs changes
-    (sleep 10 && reboot) &
-    
-else
-    log_msg "Virtio initramfs already configured"
-fi
-
-log_msg "Virtio setup complete"
-EOF
-    else
-        # Standard script for Pi machines
-        sudo tee "$root_mount_dir/usr/local/bin/fix-virtio.sh" > /dev/null << 'EOF'
-#!/bin/bash
-# Fix initramfs for Pi machine compatibility
-if [ ! -f /boot/.initramfs-fixed ]; then
-    echo "Updating initramfs for Pi machine compatibility..."
-    
-    # Ensure block device modules are loaded
-    modprobe mmc_block 2>/dev/null || true
-    modprobe sdhci 2>/dev/null || true
-    
-    # Update initramfs
-    update-initramfs -u -k all
-    
-    # Mark as fixed
-    touch /boot/.initramfs-fixed
-    
-    echo "Initramfs updated for Pi machine. Continuing boot..."
-fi
-EOF
-    fi
-
-    sudo chmod +x "$root_mount_dir/usr/local/bin/fix-virtio.sh"
-
-    # Add the script to run on boot (but only once) with higher priority
-    if [ -f "$root_mount_dir/etc/rc.local" ]; then
-        # Insert before the final 'exit 0' line
-        sudo sed -i '/^exit 0/i /usr/local/bin/fix-virtio.sh &' "$root_mount_dir/etc/rc.local"
-    fi
-    
-    # Also add to systemd for better compatibility
-    if [ -d "$root_mount_dir/etc/systemd/system" ]; then
-        sudo tee "$root_mount_dir/etc/systemd/system/virtio-fix.service" > /dev/null << 'EOF'
-[Unit]
-Description=Fix Virtio Block Device Support
-Before=multi-user.target
-After=local-fs.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/fix-virtio.sh
-RemainAfterExit=yes
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        
-        # Enable the service by creating a symlink
-        sudo mkdir -p "$root_mount_dir/etc/systemd/system/multi-user.target.wants"
-        sudo ln -sf "/etc/systemd/system/virtio-fix.service" "$root_mount_dir/etc/systemd/system/multi-user.target.wants/virtio-fix.service"
-        log "Created systemd service for virtio setup"
-    fi
-
     # Unmount root partition and detach loop device
     log "Unmounting root partition..."
     sudo umount "$root_mount_dir"
@@ -849,10 +661,6 @@ start_qemu() {
         # Use the proven working approach from the article
         qemu_args+=("-drive" "format=raw,file=$RPI_IMAGE,if=sd,index=0")
         log "Using SD card interface for Pi machine (proven working method)"
-    elif [[ "$STORAGE_INTERFACE" == "virtio" ]] || [[ "$MACHINE_TYPE" == "virt" ]]; then
-        # Use virtio interface for virt machine
-        qemu_args+=("-drive" "format=raw,file=$RPI_IMAGE,if=virtio")
-        log "Using virtio interface for virt machine"
     else
         # Fallback
         qemu_args+=("-drive" "format=raw,file=$RPI_IMAGE,if=virtio")
@@ -912,13 +720,21 @@ start_qemu() {
     
     qemu_args+=("-netdev" "$netdev_options")
 
-    # Display configuration - use nographic for proven compatibility
+    # Display configuration
     if [ "$HEADLESS" = true ]; then
+        # Headless: Use telnet monitor to avoid stdio conflicts
+        local monitor_port=$(shuf -i 20000-30000 -n 1)
         qemu_args+=("-nographic")
-        log "Running in headless mode (nographic)"
-    #else
-    #    qemu_args+=("-nographic")
-    #    log "Using nographic mode for maximum compatibility"
+        qemu_args+=("-chardev" "stdio,id=char0,signal=off")
+        qemu_args+=("-serial" "chardev:char0")
+        qemu_args+=("-monitor" "telnet:127.0.0.1:$monitor_port,server,nowait")
+        log "Running in headless mode - monitor on telnet port $monitor_port"
+        log "To access monitor: telnet localhost $monitor_port"
+    else
+        # GUI mode: Use separate channels
+        qemu_args+=("-serial" "stdio")
+        qemu_args+=("-monitor" "vc")
+        log "Running in GUI mode"
     fi
 
     # Show connection info

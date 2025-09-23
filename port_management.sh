@@ -432,6 +432,87 @@ auto_cleanup_dead_instances() {
     done
 }
 
+setup_first_boot_script() {
+    local root_mount_dir=$1
+    local distro=$2
+    
+    # Create a non-blocking first boot setup
+    sudo tee "$root_mount_dir/etc/rc.local" > /dev/null << 'EOF'
+#!/bin/sh -e
+#
+# rc.local - This script is executed at the end of each multiuser runlevel
+#
+
+# Check if this is the first boot
+if [ ! -f /boot/.first-boot-done ]; then
+    echo "Running first boot setup..." > /var/log/first-boot.log
+    
+    # Run setup in background to not block boot
+    (
+        # Wait for network to be ready
+        sleep 30
+        
+        # Run remote desktop setup if script exists
+        if [ -f /usr/local/bin/setup-remote-desktop.sh ]; then
+            echo "Setting up remote desktop services..." >> /var/log/first-boot.log
+            /usr/local/bin/setup-remote-desktop.sh >> /var/log/first-boot.log 2>&1
+        fi
+        
+        # Mark first boot as complete
+        touch /boot/.first-boot-done
+        echo "First boot setup complete!" >> /var/log/first-boot.log
+    ) &
+fi
+
+exit 0
+EOF
+    
+    sudo chmod +x "$root_mount_dir/etc/rc.local"
+    
+    # Also create a simple check script
+    sudo tee "$root_mount_dir/usr/local/bin/check-vnc-status.sh" > /dev/null << 'EOF'
+#!/bin/bash
+
+echo "=== VNC/RDP Status Check ==="
+
+# Check for various VNC servers
+if pgrep -f "vncserver|Xvnc|vncserver-x11|tigervnc|tightvnc|wayvnc" > /dev/null; then
+    echo "VNC Server: RUNNING"
+    echo "VNC Processes:"
+    ps aux | grep -E "vnc|Xvnc" | grep -v grep
+else
+    echo "VNC Server: NOT RUNNING"
+    echo "Attempting to start VNC..."
+    
+    # Try to start VNC based on what's installed
+    if command -v vncserver > /dev/null; then
+        vncserver :0 -geometry 1280x720 -depth 16
+    elif command -v tightvncserver > /dev/null; then
+        tightvncserver :0 -geometry 1280x720 -depth 16
+    fi
+fi
+
+# Check RDP
+if systemctl is-active --quiet xrdp; then
+    echo "RDP Server: RUNNING on port 3389"
+else
+    echo "RDP Server: NOT RUNNING"
+    echo "Starting RDP..."
+    systemctl start xrdp
+fi
+
+echo ""
+echo "To manually start VNC, SSH into the Pi and run:"
+echo "  vncserver :0 -geometry 1280x720"
+echo ""
+echo "To check logs:"
+echo "  cat /var/log/first-boot.log"
+echo "  journalctl -u vncserver@0"
+EOF
+    
+    sudo chmod +x "$root_mount_dir/usr/local/bin/check-vnc-status.sh"
+}
+
 # Function to show port usage statistics
 show_port_usage() {
     echo "Port Usage Statistics:"

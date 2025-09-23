@@ -368,34 +368,42 @@ esac)" 20 70
 show_options_menu() {
     local distro=$1
     local temp_file=$(mktemp)
-    
+
     # Verifica che la distribuzione sia valida
     if [[ ! "$distro" =~ ^(jessie|stretch|buster|bullseye|bookworm)$ ]]; then
         echo "ERROR: Distribuzione non valida: $distro" >&2
         show_main_menu
         return
     fi
-    
-    # Costruisci il comando dialog step by step per evitare errori di sintassi
+
+    # Base: sempre presente SSH e headless
     local dialog_cmd="dialog --title \"🔧 ${distro^} Options with Port Management\" \
         --checklist \"Select options for $distro emulation:\" 18 75 10 \
-        \"ssh\" \"Enable SSH (auto-allocated port)\" on \
-        \"vnc\" \"Enable VNC server (auto-allocated port)\" off \
-        \"rdp\" \"Enable RDP server (auto-allocated port)\" off \
-        \"headless\" \"Run headless (no GUI)\" off"
-    
+        \"ssh\" \"Enable SSH (auto-allocated port)\" on"
+
+    # Aggiungi VNC e RDP solo da buster in poi
+    if [[ "$distro" =~ ^(buster|bullseye|bookworm)$ ]]; then
+        dialog_cmd="$dialog_cmd \
+            \"vnc\" \"Enable VNC server (auto-allocated port)\" off \
+            \"rdp\" \"Enable RDP server (auto-allocated port)\" off"
+    fi
+
     # Aggiungi WayVNC solo per bookworm
     if [ "$distro" == "bookworm" ]; then
-        dialog_cmd="$dialog_cmd \"wayvnc\" \"Enable WayVNC for Wayland (auto-allocated port)\" off"
+        dialog_cmd="$dialog_cmd \
+            \"wayvnc\" \"Enable WayVNC for Wayland (auto-allocated port)\" off"
     fi
-    
+
+    dialog_cmd="$dialog_cmd \
+        \"headless\" \"Run headless (no GUI)\" off"
+
     # Esegui il comando dialog
     eval "$dialog_cmd" 2> "$temp_file"
     local dialog_result=$?
-    
+
     local selections=$(cat "$temp_file")
     rm -f "$temp_file"
-    
+
     # Gestisci il risultato
     case $dialog_result in
         0)  # OK premuto
@@ -419,11 +427,13 @@ show_options_menu() {
             show_main_menu
             ;;
         *)  # Errore imprevisto
-            dialog --title "Dialog Error" --msgbox "An error occurred with the dialog. Returning to main menu." 8 60
+            dialog --title "Dialog Error" \
+                   --msgbox "An error occurred with the dialog. Returning to main menu." 8 60
             show_main_menu
             ;;
     esac
 }
+
 
 # Launch options menu with port configuration
 show_launch_options_menu() {
@@ -857,7 +867,7 @@ Press OK to continue to the main menu..." 25 75
 
 # FIXED: More selective cleanup that doesn't interfere with other menu sessions
 cleanup_menu() {
-    #clear
+    clear
     echo -e "${CYAN}Raspberry Pi QEMU Emulator with Port Management - Goodbye!${NC}"
     
     # Only cleanup if:
