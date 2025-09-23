@@ -20,6 +20,7 @@ RPI_IMAGE_URL="https://downloads.raspberrypi.org/raspios_arm64/images/raspios_ar
 RPI_IMAGE_XZ="2023-05-03-raspios-bullseye-arm64.img.xz"
 RPI_IMAGE="2023-05-03-raspios-bullseye-arm64.img"
 DISTRO="Bullseye"
+DISTRO_LOWER=$(echo "$DISTRO" | tr '[:upper:]' '[:lower:]')
 RPI_PASSWORD="raspberry"
 WORK_DIR="$HOME/qemu-rpi/bullseye"
 SSH_PORT="auto"
@@ -31,6 +32,7 @@ ENABLE_RDP=false
 ENABLE_WAYVNC=false
 HEADLESS=false
 INSTANCE_ID=""
+CURRENT_QEMU_PID=""
 FORCE_VIRT=false
 
     # Detect available QEMU machine types and select the best one
@@ -787,6 +789,46 @@ resize_image() {
     log "Image resized to 8GB ✓"
 }
 
+handle_shutdown() {
+    local qemu_pid=$1
+    local monitor_pid=$2
+    
+    log "Received shutdown signal (Ctrl+C), cleaning up gracefully..."
+    
+    # Termina il processo di monitoring
+    if [ -n "$monitor_pid" ]; then
+        kill $monitor_pid 2>/dev/null || true
+    fi
+    
+    # Termina QEMU in modo pulito
+    if [ -n "$qemu_pid" ] && kill -0 "$qemu_pid" 2>/dev/null; then
+        log "Sending TERM signal to QEMU process $qemu_pid"
+        kill -TERM "$qemu_pid" 2>/dev/null || true
+        
+        # Attendi terminazione pulita
+        local count=0
+        while kill -0 "$qemu_pid" 2>/dev/null && [ $count -lt 10 ]; do
+            sleep 1
+            ((count++))
+        done
+        
+        # Force kill se necessario
+        if kill -0 "$qemu_pid" 2>/dev/null; then
+            log "Force killing QEMU process $qemu_pid"
+            kill -KILL "$qemu_pid" 2>/dev/null || true
+        fi
+    fi
+    
+    # Cleanup istanza
+    if [ -n "$INSTANCE_ID" ]; then
+        log "Cleaning up instance $INSTANCE_ID"
+        cleanup_instance_ports "$INSTANCE_ID"
+    fi
+    
+    log "Cleanup completed, exiting"
+    exit 0
+}
+
 # Start QEMU with proper interface selection based on machine type
 start_qemu() {
     log "Starting QEMU Raspberry Pi ARM64 emulation..."
@@ -939,36 +981,74 @@ start_qemu() {
     
     log "Waiting for boot... (this may take several minutes)"
     
-    log "Starting [$DISTRO] emulation..."
+        log "Starting [$DISTRO] emulation..."
     "$qemu_cmd" "${qemu_args[@]}" &
     local qemu_pid=$!
     
-    # FIXED: Update the state file with the actual QEMU PID
+    export CURRENT_QEMU_PID=$qemu_pid
+    
+    # Aggiorna PID nel state file
     if [ -n "$INSTANCE_ID" ]; then
         local state_file="$INSTANCE_STATE_DIR/$INSTANCE_ID.state"
         if [ -f "$state_file" ]; then
-            # Update PID in state file using a temporary file to avoid race conditions
             local temp_file=$(mktemp)
             sed "s/PID=PENDING/PID=$qemu_pid/" "$state_file" > "$temp_file"
             mv "$temp_file" "$state_file"
             log "Updated instance $INSTANCE_ID with QEMU PID $qemu_pid"
-        else
-            warning "State file not found for instance $INSTANCE_ID"
         fi
     fi
     
-    # Wait for QEMU process to complete
+    # MIGLIORATO: Monitor più robusto con cleanup garantito
+    (
+        while true; do
+            if ! kill -0 $qemu_pid 2>/dev/null; then
+                log "QEMU process $qemu_pid has terminated (detected by monitor)"
+                if [ -n "$INSTANCE_ID" ]; then
+                    log "Cleaning up instance $INSTANCE_ID after QEMU termination"
+                    cleanup_instance_ports "$INSTANCE_ID"
+                fi
+                exit 0
+            fi
+            sleep 1  # Controllo più frequente
+        done
+    ) &
+    local monitor_pid=$!
+    
+    # Trap migliorato che gestisce entrambi i processi
+    cleanup_on_exit() {
+        log "Cleaning up QEMU processes..."
+        kill $monitor_pid 2>/dev/null || true
+        if [ -n "$qemu_pid" ] && kill -0 "$qemu_pid" 2>/dev/null; then
+            kill -TERM "$qemu_pid" 2>/dev/null || true
+            sleep 2
+            kill -KILL "$qemu_pid" 2>/dev/null || true
+        fi
+        if [ -n "$INSTANCE_ID" ]; then
+            cleanup_instance_ports "$INSTANCE_ID"
+        fi
+    }
+    
+    trap cleanup_on_exit TERM INT EXIT
+    
+    # Aspetta il processo QEMU
     wait $qemu_pid
     local exit_code=$?
     
-    log "QEMU process $qemu_pid exited with code $exit_code"
+    # Cleanup esplicito
+    kill $monitor_pid 2>/dev/null || true
+    
+    if [ -n "$INSTANCE_ID" ]; then
+        log "QEMU exited with code $exit_code, cleaning up instance $INSTANCE_ID"
+        cleanup_instance_ports "$INSTANCE_ID"
+    fi
+    
     return $exit_code
-
 }
 
-# Cleanup function
+
+# Aggiornare la funzione cleanup() in TUTTI gli emulatori:
 cleanup() {
-    log "Cleaning up..."
+    log "Running cleanup function..."
     
     # Standard filesystem cleanup
     sudo umount /tmp/rpi_boot_* 2>/dev/null || true
@@ -976,21 +1056,33 @@ cleanup() {
     sudo rmdir /tmp/rpi_boot_* 2>/dev/null || true
     sudo rmdir /tmp/rpi_root_* 2>/dev/null || true
     
-    # Distribution-specific cleanup (like Jessie filesystem unmounting)
-    # Add distribution-specific cleanup here if needed
+    # CORREZIONE: Cleanup istanza solo se abbiamo allocato noi le porte
+    if [ -n "$INSTANCE_ID" ]; then
+        local state_file="$INSTANCE_STATE_DIR/$INSTANCE_ID.state"
+        if [ -f "$state_file" ]; then
+            source "$state_file"
+            # Verifica se siamo il proprietario dell'istanza
+            if [ "$OWNER_PID" = "$$" ] || [ "$need_allocation" = "true" ]; then
+                log "Cleaning up ports for instance $INSTANCE_ID (we own it)"
+                cleanup_instance_ports "$INSTANCE_ID"
+            else
+                log "Instance $INSTANCE_ID owned by different process, not cleaning up"
+            fi
+        fi
+    fi
     
-    # Port cleanup - only if we allocated the ports ourselves
-    if [ -n "$INSTANCE_ID" ] && [ "$need_allocation" = true ]; then
-        log "Cleaning up ports for instance $INSTANCE_ID (allocated by this script)"
-        cleanup_instance_ports "$INSTANCE_ID"
-    elif [ -n "$INSTANCE_ID" ]; then
-        log "Instance $INSTANCE_ID managed by menu, not cleaning up ports"
+    # Cleanup processi QEMU orfani
+    if [ -n "$CURRENT_QEMU_PID" ] && kill -0 "$CURRENT_QEMU_PID" 2>/dev/null; then
+        log "Terminating orphaned QEMU process $CURRENT_QEMU_PID"
+        kill -TERM "$CURRENT_QEMU_PID" 2>/dev/null || true
     fi
 }
 
 
 # Handle signals for cleanup
-trap cleanup EXIT INT TERM
+trap 'cleanup; exit 130' INT     # Ctrl+C
+trap 'cleanup; exit 143' TERM    # Terminate signal  
+trap 'cleanup' EXIT              # Normal exit
 
 # Main function
 main() {
@@ -1000,6 +1092,8 @@ main() {
     echo "==============================================="
     echo -e "${NC}"
 
+    auto_cleanup_dead_instances
+    
     check_dependencies
     download_image
     extract_boot_files
@@ -1033,6 +1127,8 @@ main() {
         if [ "$ENABLE_RDP" = true ]; then RDP_PORT=$ALLOCATED_RDP_PORT; fi
         if [ "$ENABLE_WAYVNC" = true ]; then WAYVNC_PORT=$ALLOCATED_WAYVNC_PORT; fi
         
+        export need_allocation=true        
+        
     else
         # We're being called from menu, ports already allocated
         log "Using pre-allocated ports from menu: SSH=$ALLOCATED_SSH_PORT"
@@ -1051,6 +1147,8 @@ main() {
         if [ "$ENABLE_VNC" = true ]; then VNC_PORT=$ALLOCATED_VNC_PORT; fi
         if [ "$ENABLE_RDP" = true ]; then RDP_PORT=$ALLOCATED_RDP_PORT; fi
         if [ "$ENABLE_WAYVNC" = true ]; then WAYVNC_PORT=$ALLOCATED_WAYVNC_PORT; fi
+        
+        export need_allocation=false
     fi
 
     start_qemu
@@ -1124,6 +1222,10 @@ while [[ $# -gt 0 ]]; do
             else
                 shift 1
             fi
+            ;;
+        --force-virt)
+            FORCE_VIRT=true
+            shift 1
             ;;
         --headless)
             HEADLESS=true

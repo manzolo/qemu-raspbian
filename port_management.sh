@@ -418,6 +418,20 @@ cleanup_stale_instances() {
     fi
 }
 
+auto_cleanup_dead_instances() {
+    for state_file in "$INSTANCE_STATE_DIR"/*.state; do
+        if [ -f "$state_file" ]; then
+            source "$state_file"
+            
+            # Se PID è morto, pulisci l'istanza
+            if [ "$PID" != "PENDING" ] && ! kill -0 "$PID" 2>/dev/null; then
+                log "Found dead instance $INSTANCE_ID (PID $PID), cleaning up..."
+                cleanup_instance_ports "$INSTANCE_ID"
+            fi
+        fi
+    done
+}
+
 # Function to show port usage statistics
 show_port_usage() {
     echo "Port Usage Statistics:"

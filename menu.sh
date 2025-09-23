@@ -806,14 +806,7 @@ FEATURES:
 ✅ SSH, VNC, and RDP remote access with auto port allocation
 ✅ Headless and GUI modes
 ✅ Multiple concurrent instances support
-✅ Intelligent port conflict resolution
 ✅ Instance management and monitoring
-
-FIXED IN THIS VERSION:
-🔧 Resolved cleanup conflicts between multiple menu sessions
-🔧 Better instance ownership tracking
-🔧 Improved port allocation logic
-🔧 Fixed multiple VM launch issues
 
 FIRST TIME USERS:
 • Images will be downloaded automatically (1-2.4GB each)
@@ -826,7 +819,7 @@ Press OK to continue to the main menu..." 25 75
 
 # FIXED: More selective cleanup that doesn't interfere with other menu sessions
 cleanup_menu() {
-    clear
+    #clear
     echo -e "${CYAN}Raspberry Pi QEMU Emulator with Port Management - Goodbye!${NC}"
     
     # Only cleanup if:
