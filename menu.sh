@@ -8,6 +8,19 @@
 # Load port management system
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT_MGMT_SCRIPT="$SCRIPT_DIR/port_management.sh"
+DEBUG=0
+for arg in "$@"; do
+    if [ "$arg" = "--debug" ]; then
+        DEBUG=1
+        shift
+    fi
+done
+
+clear_screen() {
+    if [ "$DEBUG" -eq 0 ]; then
+        clear
+    fi
+}
 
 if [ ! -f "$PORT_MGMT_SCRIPT" ]; then
     error "Port management script not found: $PORT_MGMT_SCRIPT"
@@ -270,11 +283,11 @@ show_main_menu() {
     
     dialog --title "🍓 Raspberry Pi QEMU Emulator with Port Management" \
            --menu "Choose a Raspberry Pi OS version to emulate:" 18 85 10 \
-           "jessie" "Raspbian Jessie 2017 (Lightweight, Classic)" \
-           "stretch" "Raspbian Stretch 2018 (VNC Built-in)" \
-           "buster" "Raspbian Buster 2020 (Stable, RealVNC)" \
-           "bullseye" "Pi OS Bullseye 2022 (Modern, ARMhf)" \
-           "bookworm" "Pi OS Bookworm 2025 (Latest, Full Suite)" \
+           "jessie" "Raspbian Jessie" \
+           "stretch" "Raspbian Stretch" \
+           "buster" "Raspbian Buster" \
+           "bullseye" "Pi OS Bullseye" \
+           "bookworm" "Pi OS Bookworm (Experimental)" \
            "instances" "🖥️ Instance Management$instance_display" \
            "info" "📋 View Detailed Information" \
            "deps" "🔧 Check Dependencies" \
@@ -301,7 +314,7 @@ show_main_menu() {
             show_help_menu
             ;;
         "quit"|"")
-            clear
+            clear_screen
             echo -e "${CYAN}Thanks for using Raspberry Pi QEMU Emulator!${NC}"
             exit 0
             ;;
@@ -314,11 +327,11 @@ show_info_menu() {
     
     dialog --title "📋 Distribution Information" \
            --menu "Select a distribution for detailed info:" 15 70 8 \
-           "jessie" "Raspbian Jessie 2017" \
-           "stretch" "Raspbian Stretch 2018" \
-           "buster" "Raspbian Buster 2020" \
-           "bullseye" "Pi OS Bullseye 2022" \
-           "bookworm" "Pi OS Bookworm 2025" \
+           "jessie" "Raspbian Jessie" \
+           "stretch" "Raspbian Stretch" \
+           "buster" "Raspbian Buster" \
+           "bullseye" "Pi OS Bullseye" \
+           "bookworm" "Pi OS Bookworm" \
            "back" "← Back to Main Menu" 2> "$temp_file"
     
     local choice=$(cat "$temp_file")
@@ -629,7 +642,7 @@ Connection Info:
 Do you want to proceed?" 25 80
     
     if [ $? -eq 0 ]; then
-        clear
+        clear_screen
         echo -e "${GREEN}Launching $distro emulation with instance ID: $instance_id${NC}"
         echo -e "${YELLOW}Allocated ports: SSH=$ALLOCATED_SSH_PORT"
         [ "$enable_vnc" = true ] && echo -e "VNC=$ALLOCATED_VNC_PORT"
@@ -858,7 +871,7 @@ FEATURES:
 
 FIRST TIME USERS:
 • Images will be downloaded automatically (1-2.4GB each)
-• Ports are allocated automatically - no conflicts!
+• Ports are allocated automatically
 • Allow 5-10 minutes for first setup per instance
 • Default login: pi / raspberry
 
@@ -867,7 +880,7 @@ Press OK to continue to the main menu..." 25 75
 
 # FIXED: More selective cleanup that doesn't interfere with other menu sessions
 cleanup_menu() {
-    clear
+    clear_screen
     echo -e "${CYAN}Raspberry Pi QEMU Emulator with Port Management - Goodbye!${NC}"
     
     # Only cleanup if:
