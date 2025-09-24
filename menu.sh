@@ -382,7 +382,7 @@ show_options_menu() {
         \"ssh\" \"Enable SSH (auto-allocated port)\" on"
 
     # Aggiungi VNC e RDP solo da buster in poi
-    if [[ "$distro" =~ ^(buster|bullseye|bookworm)$ ]]; then
+    if [[ "$distro" =~ ^(bullseye|bookworm)$ ]]; then
         dialog_cmd="$dialog_cmd \
             \"vnc\" \"Enable VNC server (auto-allocated port)\" off \
             \"rdp\" \"Enable RDP server (auto-allocated port)\" off"
