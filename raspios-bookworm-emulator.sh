@@ -255,37 +255,182 @@ build_custom_kernel() {
     log "Build directory cleaned to save space ✓"
 }
 
-# FIXED: Setup SSH and user config following guide's exact method
+# FIXED: Setup SSH and user config following guide's exact method + virtualization fixes
 setup_ssh_and_user() {
     log "Setting up SSH and user configuration..."
     
-    # Get boot partition offset exactly as in guide
+    # Get boot and root partition offsets exactly as in guide
     local boot_start=$(fdisk -l "$RPI_IMAGE" | awk '/W95 FAT32/ {print $2}')
     local boot_offset=$((boot_start * 512))
+    local root_start=$(fdisk -l "$RPI_IMAGE" | awk '/Linux/ {print $2}')
+    local root_offset=$((root_start * 512))
     
     log "Boot partition offset: $boot_offset"
+    log "Root partition offset: $root_offset"
     
-    # Create temporary mount directory
-    local mount_dir="/tmp/rpi_boot_$$"
-    sudo mkdir -p "$mount_dir"
+    # Create temporary mount directories
+    local boot_mount_dir="/tmp/rpi_boot_$"
+    local root_mount_dir="/tmp/rpi_root_$"
+    sudo mkdir -p "$boot_mount_dir" "$root_mount_dir"
     
     # Mount boot partition
-    sudo mount -o loop,offset="$boot_offset" "$RPI_IMAGE" "$mount_dir"
+    sudo mount -o loop,offset="$boot_offset" "$RPI_IMAGE" "$boot_mount_dir"
     
     # Enable SSH exactly as in guide
-    sudo touch "$mount_dir/ssh"
+    sudo touch "$boot_mount_dir/ssh"
     
     # Create user configuration as in guide
     log "Generating password hash for user 'pi'..."
     local password_hash
     password_hash=$(openssl passwd -6 "$RPI_PASSWORD")
-    echo "pi:$password_hash" | sudo tee "$mount_dir/userconf.txt" > /dev/null
+    echo "pi:$password_hash" | sudo tee "$boot_mount_dir/userconf.txt" > /dev/null
     
-    # Unmount
-    sudo umount "$mount_dir"
-    sudo rmdir "$mount_dir"
+    # Unmount boot partition
+    sudo umount "$boot_mount_dir"
+    
+    # Mount root partition for virtualization optimizations
+    log "Applying virtualization optimizations to root filesystem..."
+    sudo mount -o loop,offset="$root_offset" "$RPI_IMAGE" "$root_mount_dir"
+    
+    # Fix display manager issues in virtualized environment
+    log "Configuring display manager for virtualization..."
+    
+    # Disable lightdm auto-start (it hangs waiting for GPU)
+    if [ -f "$root_mount_dir/etc/systemd/system/display-manager.service" ]; then
+        sudo rm "$root_mount_dir/etc/systemd/system/display-manager.service" 2>/dev/null || true
+    fi
+    
+    # Create a custom display manager service that works in QEMU
+    sudo tee "$root_mount_dir/etc/systemd/system/qemu-display.service" > /dev/null << 'EOF'
+[Unit]
+Description=QEMU Display Manager for Virtual Environment
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=forking
+ExecStartPre=/bin/sleep 10
+ExecStart=/usr/bin/startx -- :0 vt7 -nolisten tcp
+Restart=no
+User=pi
+Group=pi
+WorkingDirectory=/home/pi
+
+[Install]
+WantedBy=graphical.target
+EOF
+    
+    # Configure X11 for QEMU virtual environment
+    log "Configuring X11 for QEMU..."
+    sudo mkdir -p "$root_mount_dir/etc/X11/xorg.conf.d"
+    
+    # Create X11 config for QEMU virtual GPU
+    sudo tee "$root_mount_dir/etc/X11/xorg.conf.d/99-qemu.conf" > /dev/null << 'EOF'
+Section "Device"
+    Identifier "QEMU Virtual GPU"
+    Driver "modesetting"
+    Option "AccelMethod" "none"
+    Option "DRI" "false"
+EndSection
+
+Section "Screen"
+    Identifier "Default Screen"
+    Device "QEMU Virtual GPU"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Modes "1024x768" "800x600" "640x480"
+    EndSubSection
+EndSection
+EOF
+    
+    # Configure VNC server
+    if [ "$ENABLE_VNC" = true ]; then
+        log "Configuring VNC server..."
+        
+        # Install and configure x11vnc service
+        sudo tee "$root_mount_dir/etc/systemd/system/x11vnc.service" > /dev/null << 'EOF'
+[Unit]
+Description=Start x11vnc at startup
+After=display-manager.service graphical.target
+Requires=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/x11vnc -display :0 -forever -loop -noxdamage -repeat -rfbauth /home/pi/.vnc/passwd -rfbport 5900
+ExecStop=/usr/bin/killall x11vnc
+Restart=on-failure
+User=pi
+
+[Install]
+WantedBy=graphical.target
+EOF
+        
+        # Create VNC password directory
+        sudo mkdir -p "$root_mount_dir/home/pi/.vnc"
+        
+        # Set VNC password (raspberry)
+        echo "$RPI_PASSWORD" | sudo tee "$root_mount_dir/home/pi/.vnc/passwd_plain" > /dev/null
+        
+        # Create script to set VNC password on first boot
+        sudo tee "$root_mount_dir/etc/rc.local" > /dev/null << 'EOF'
+#!/bin/bash
+# Generate VNC password on first boot
+if [ ! -f /home/pi/.vnc/passwd ]; then
+    echo "Setting up VNC password..."
+    echo 'raspberry' | vncpasswd -f > /home/pi/.vnc/passwd
+    chmod 600 /home/pi/.vnc/passwd
+    chown pi:pi /home/pi/.vnc/passwd
+    systemctl enable x11vnc.service
+    systemctl start x11vnc.service
+fi
+exit 0
+EOF
+        sudo chmod +x "$root_mount_dir/etc/rc.local"
+    fi
+    
+    # Configure RDP (xrdp) if enabled
+    if [ "$ENABLE_RDP" = true ]; then
+        log "Configuring XRDP server..."
+        
+        # Create xrdp configuration for virtual environment
+        sudo mkdir -p "$root_mount_dir/etc/xrdp"
+        sudo tee "$root_mount_dir/etc/xrdp/xrdp.ini.qemu" > /dev/null << 'EOF'
+[Globals]
+bitmap_cache=true
+bitmap_compression=true
+port=3389
+crypt_level=low
+channel_code=1
+use_fastpath=both
+
+[Xorg]
+name=Xorg
+lib=libxup.so
+username=ask
+password=ask
+ip=127.0.0.1
+port=-1
+code=20
+EOF
+        
+        # Enable xrdp service
+        if [ -d "$root_mount_dir/etc/systemd/system/multi-user.target.wants" ]; then
+            sudo ln -sf /lib/systemd/system/xrdp.service "$root_mount_dir/etc/systemd/system/multi-user.target.wants/xrdp.service" 2>/dev/null || true
+        fi
+    fi
+    
+    # Fix ownership
+    sudo chown -R 1000:1000 "$root_mount_dir/home/pi" 2>/dev/null || true
+    
+    # Unmount root partition
+    sudo umount "$root_mount_dir"
+    
+    # Cleanup mount directories
+    sudo rmdir "$boot_mount_dir" "$root_mount_dir"
     
     log "SSH and user configuration completed ✓"
+    log "Virtualization display optimizations applied ✓"
 }
 
 # FIXED: Resize image using proven method from guide
@@ -415,15 +560,6 @@ start_qemu() {
     echo " Monitor: telnet localhost 5555"
     echo
     
-    warning "NETWORK BOOT FIX APPLIED:"
-    echo " - Using virt machine with virtio-net-pci (proven working)"
-    echo " - Custom kernel built with kvm_guest config"
-    echo " - Proper virtio block device configuration"
-    echo " - Root device correctly set to /dev/vda2"
-    echo " - Network device: virtio-net-pci (replaces problematic usb-net)"
-    if [ "$HEADLESS" != true ]; then
-        echo " - GPU acceleration enabled if DRI devices available"
-    fi
     echo
     
     log "Starting ARM64 emulation with NETWORK BOOT FIXES..."
