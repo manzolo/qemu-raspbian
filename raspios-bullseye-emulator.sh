@@ -731,6 +731,8 @@ start_qemu() {
         log "Running in headless mode - monitor on telnet port $monitor_port"
         log "To access monitor: telnet localhost $monitor_port"
     else
+        #-device usb-net,netdev=net0
+        qemu_args+=("-usb" "-device" "usb-mouse" "-device" "usb-kbd")
         # GUI mode: Use separate channels
         qemu_args+=("-serial" "stdio")
         qemu_args+=("-monitor" "vc")
