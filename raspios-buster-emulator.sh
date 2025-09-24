@@ -514,9 +514,21 @@ start_qemu() {
 
     # Display configuration
     if [ "$HEADLESS" = true ]; then
+        # Headless: Use telnet monitor to avoid stdio conflicts
+        local monitor_port=$(shuf -i 20000-30000 -n 1)
         qemu_args+=("-nographic")
-        log "Running in headless mode (nographic)"
+        qemu_args+=("-chardev" "stdio,id=char0,signal=off")
+        qemu_args+=("-serial" "chardev:char0")
+        qemu_args+=("-monitor" "telnet:127.0.0.1:$monitor_port,server,nowait")
+        log "Running in headless mode - monitor on telnet port $monitor_port"
+        log "To access monitor: telnet localhost $monitor_port"
+    else
+        # GUI mode: Use separate channels
+        qemu_args+=("-serial" "stdio")
+        qemu_args+=("-monitor" "vc")
+        log "Running in GUI mode"
     fi
+
 
     # Show connection info
     echo
